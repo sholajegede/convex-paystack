@@ -48,6 +48,16 @@ const subscriptionValidator = v.object({
   updatedAt: v.number(),
 });
 
+const webhookEventValidator = v.object({
+  _id: v.id("webhookEvents"),
+  _creationTime: v.number(),
+  eventId: v.string(),
+  eventType: v.string(),
+  reference: v.optional(v.string()),
+  payload: v.string(),
+  receivedAt: v.number(),
+});
+
 // ─── Queries ────────────────────────────────────────────────────────────────
 
 export const getTransaction = query({
@@ -108,6 +118,52 @@ export const hasActiveSubscription = query({
       .order("desc")
       .first();
     return sub?.status === "active" || sub?.status === "non-renewing";
+  },
+});
+
+/**
+ * Reads the raw webhook event log, newest first — useful for an audit
+ * trail or a live "what just happened" console in your own app. Every
+ * event Paystack has ever sent to this component's webhook handler is
+ * recorded here for idempotency, whether or not it triggered a state
+ * change.
+ */
+export const listRecentEvents = query({
+  args: { limit: v.optional(v.number()) },
+  returns: v.array(webhookEventValidator),
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("webhookEvents")
+      .order("desc")
+      .take(args.limit ?? 50);
+  },
+});
+
+/**
+ * Aggregate row counts across all three tables — enough for a small
+ * dashboard stat row. This does a full table scan, so it's fine for the
+ * data volumes a demo or small integration produces; a high-volume
+ * production app should track its own counters instead of calling this
+ * on every render.
+ */
+export const getStats = query({
+  args: {},
+  returns: v.object({
+    transactions: v.number(),
+    subscriptions: v.number(),
+    events: v.number(),
+  }),
+  handler: async (ctx) => {
+    const [transactions, subscriptions, events] = await Promise.all([
+      ctx.db.query("transactions").collect(),
+      ctx.db.query("subscriptions").collect(),
+      ctx.db.query("webhookEvents").collect(),
+    ]);
+    return {
+      transactions: transactions.length,
+      subscriptions: subscriptions.length,
+      events: events.length,
+    };
   },
 });
 

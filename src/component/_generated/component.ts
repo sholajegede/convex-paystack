@@ -36,6 +36,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         { alreadyProcessed: boolean },
         Name
       >;
+      getStats: FunctionReference<
+        "query",
+        "internal",
+        {},
+        { events: number; subscriptions: number; transactions: number },
+        Name
+      >;
       getSubscription: FunctionReference<
         "query",
         "internal",
@@ -88,6 +95,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { customerEmail: string },
         boolean,
+        Name
+      >;
+      listRecentEvents: FunctionReference<
+        "query",
+        "internal",
+        { limit?: number },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          eventId: string;
+          eventType: string;
+          payload: string;
+          receivedAt: number;
+          reference?: string;
+        }>,
         Name
       >;
       listSubscriptions: FunctionReference<

@@ -8,12 +8,26 @@ export type PaystackOptions = {
   secretKey: string;
 };
 
+export type PaystackChannel =
+  | "card"
+  | "bank"
+  | "apple_pay"
+  | "ussd"
+  | "qr"
+  | "mobile_money"
+  | "bank_transfer"
+  | "eft"
+  | "capitec_pay"
+  | "payattitude";
+
 export type InitializeTransactionArgs = {
   email: string;
   amount: number;
   currency?: string;
   callbackUrl?: string;
   reference?: string;
+  channels?: PaystackChannel[];
+  plan?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -33,6 +47,36 @@ export type VerifyTransactionResult = {
   paidAt?: number;
   authorizationCode?: string;
   customerEmail: string;
+};
+
+export type PlanInterval =
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "quarterly"
+  | "biannually"
+  | "annually";
+
+export type CreatePlanArgs = {
+  name: string;
+  amount: number;
+  interval: PlanInterval;
+  currency?: string;
+  description?: string;
+};
+
+export type PlanResult = {
+  planCode: string;
+  name: string;
+  amount: number;
+  interval: string;
+  currency: string;
+  description?: string;
+};
+
+export type Balance = {
+  currency: string;
+  balance: number;
 };
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -57,6 +101,17 @@ async function hmacSha512Hex(secret: string, payload: string): Promise<string> {
   return Array.from(new Uint8Array(signature))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function planFromPaystack(plan: Record<string, unknown>): PlanResult {
+  return {
+    planCode: plan.plan_code as string,
+    name: plan.name as string,
+    amount: plan.amount as number,
+    interval: plan.interval as string,
+    currency: (plan.currency as string) ?? "NGN",
+    description: (plan.description as string) ?? undefined,
+  };
 }
 
 export class Paystack {
@@ -184,6 +239,17 @@ export class Paystack {
           }
           break;
         }
+        case "invoice.payment_failed": {
+          const subscription = data.subscription as Record<string, unknown> | undefined;
+          const subscriptionCode = subscription?.subscription_code as string | undefined;
+          if (subscriptionCode) {
+            await ctx.runMutation(component_.lib.updateSubscriptionStatus, {
+              subscriptionCode,
+              status: "attention",
+            });
+          }
+          break;
+        }
         default:
           break;
       }
@@ -211,6 +277,8 @@ export class Paystack {
         currency: args.currency,
         callback_url: args.callbackUrl,
         reference: args.reference,
+        channels: args.channels,
+        plan: args.plan,
         metadata: args.metadata,
       }),
     });
@@ -336,6 +404,132 @@ export class Paystack {
     });
   }
 
+  /**
+   * Create a Paystack billing plan. Plans are the foundation for
+   * subscriptions: pass the returned `planCode` as `plan` to
+   * `initializeTransaction` to start a subscription on first payment.
+   */
+  async createPlan(
+    ctx: GenericActionCtx<GenericDataModel>,
+    args: CreatePlanArgs,
+  ): Promise<PlanResult> {
+    const res = await fetch(`${PAYSTACK_API_BASE}/plan`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.options.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: args.name,
+        amount: args.amount,
+        interval: args.interval,
+        currency: args.currency,
+        description: args.description,
+      }),
+    });
+    const json = (await res.json()) as {
+      status: boolean;
+      message?: string;
+      data: Record<string, unknown>;
+    };
+    if (!json.status) {
+      throw new Error(json.message ?? "Failed to create Paystack plan");
+    }
+    return planFromPaystack(json.data);
+  }
+
+  /**
+   * Lists the currencies this Paystack account actually has enabled, with
+   * their current balance. Use this to build a currency picker that only
+   * ever offers currencies that will really work — `initializeTransaction`
+   * throws "Currency not supported by merchant" for anything else.
+   * Requires the secret key to have balance-read access; if it doesn't,
+   * catch the error and fall back to your account's default currency.
+   */
+  async listBalances(_ctx: GenericActionCtx<GenericDataModel>): Promise<Balance[]> {
+    const res = await fetch(`${PAYSTACK_API_BASE}/balance`, {
+      headers: { Authorization: `Bearer ${this.options.secretKey}` },
+    });
+    const json = (await res.json()) as {
+      status: boolean;
+      message?: string;
+      data: Balance[];
+    };
+    if (!json.status) {
+      throw new Error(json.message ?? "Failed to fetch Paystack balance");
+    }
+    return json.data;
+  }
+
+  /**
+   * Fetches a customer's subscriptions directly from Paystack (via the
+   * Fetch Customer endpoint, which returns them inline) and upserts each
+   * one locally. A checkout initialized with `plan` starts a subscription
+   * on Paystack's side immediately, but this component only learns about
+   * it when the `subscription.create` webhook arrives — which, in local
+   * development, requires that webhook URL to actually be registered in
+   * the Paystack Dashboard. Call this right after a subscription checkout
+   * returns to reconcile state even if that webhook hasn't fired yet.
+   * Returns the number of subscriptions synced.
+   */
+  async syncCustomerSubscriptions(
+    ctx: GenericActionCtx<GenericDataModel>,
+    args: { email: string },
+  ): Promise<number> {
+    const res = await fetch(
+      `${PAYSTACK_API_BASE}/customer/${encodeURIComponent(args.email)}`,
+      { headers: { Authorization: `Bearer ${this.options.secretKey}` } },
+    );
+    const json = (await res.json()) as {
+      status: boolean;
+      message?: string;
+      data?: { subscriptions?: Record<string, unknown>[] };
+    };
+    if (!json.status) {
+      throw new Error(json.message ?? "Failed to fetch Paystack customer");
+    }
+
+    const subscriptions = json.data?.subscriptions ?? [];
+    for (const sub of subscriptions) {
+      const plan = sub.plan as Record<string, unknown> | undefined;
+      const customer = sub.customer as Record<string, unknown> | undefined;
+      await ctx.runMutation(this.component.lib.recordSubscriptionEvent, {
+        subscriptionCode: sub.subscription_code as string,
+        emailToken: (sub.email_token as string) ?? undefined,
+        customerEmail: args.email,
+        customerCode: (customer?.customer_code as string) ?? undefined,
+        planCode: (plan?.plan_code as string) ?? "",
+        status: (sub.status as string as
+          | "active"
+          | "non-renewing"
+          | "attention"
+          | "completed"
+          | "cancelled") ?? "active",
+        amount: (sub.amount as number) ?? (plan?.amount as number) ?? undefined,
+        nextPaymentDate: sub.next_payment_date
+          ? new Date(sub.next_payment_date as string).getTime()
+          : undefined,
+      });
+    }
+    return subscriptions.length;
+  }
+
+  /** List billing plans already created on this Paystack account. */
+  async listPlans(_ctx: GenericActionCtx<GenericDataModel>): Promise<PlanResult[]> {
+    const res = await fetch(`${PAYSTACK_API_BASE}/plan?perPage=100`, {
+      headers: { Authorization: `Bearer ${this.options.secretKey}` },
+    });
+    const json = (await res.json()) as {
+      status: boolean;
+      message?: string;
+      data: Record<string, unknown>[];
+    };
+    if (!json.status) {
+      throw new Error(json.message ?? "Failed to list Paystack plans");
+    }
+    return json.data.map(planFromPaystack);
+  }
+
   async getTransaction(ctx: RunQueryCtx, args: { reference: string }) {
     return await ctx.runQuery(this.component.lib.getTransaction, args);
   }
@@ -354,6 +548,20 @@ export class Paystack {
 
   async hasActiveSubscription(ctx: RunQueryCtx, args: { customerEmail: string }): Promise<boolean> {
     return await ctx.runQuery(this.component.lib.hasActiveSubscription, args);
+  }
+
+  /**
+   * Reads the raw webhook event log, newest first — every event Paystack
+   * has sent this component, whether or not it changed local state.
+   * Handy for an audit trail or a live "what just happened" console.
+   */
+  async listRecentEvents(ctx: RunQueryCtx, args?: { limit?: number }) {
+    return await ctx.runQuery(this.component.lib.listRecentEvents, args ?? {});
+  }
+
+  /** Aggregate row counts — see {@link ComponentApi}'s `lib.getStats`. */
+  async getStats(ctx: RunQueryCtx) {
+    return await ctx.runQuery(this.component.lib.getStats, {});
   }
 }
 

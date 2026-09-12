@@ -33,7 +33,8 @@ This component owns all of that. Drop it in, mount the webhook, and your Convex 
 
 - **Reactive transaction state** — every transaction, live in Convex, keyed by reference
 - **Reactive subscription state** — subscription status, plan, next payment date, live in Convex
-- **Checkout** — `initializeTransaction()` generates a Paystack-hosted checkout link
+- **Checkout** — `initializeTransaction()` generates a Paystack-hosted checkout link for one-time payments or, with a `plan` code, for subscriptions
+- **Plan management** — `createPlan()` / `listPlans()` manage the billing plans subscriptions are built on
 - **Server-side verification** — `verifyTransaction()` confirms a transaction directly with Paystack
 - **Subscription management** — `cancelSubscription()` / `enableSubscription()` call Paystack directly and keep local state in sync
 - **Webhook idempotency** — duplicate deliveries of the same event are detected and skipped
@@ -47,6 +48,7 @@ This component owns all of that. Drop it in, mount the webhook, and your Convex 
 - [Setup](#setup)
 - [Usage](#usage)
 - [Checkout](#checkout)
+- [Plans](#plans)
 - [Subscriptions](#subscriptions)
 - [API Reference](#api-reference)
 - [Type Reference](#type-reference)
@@ -54,6 +56,7 @@ This component owns all of that. Drop it in, mount the webhook, and your Convex 
 - [Database Schema](#database-schema)
 - [Customer IDs](#customer-ids)
 - [Testing](#testing)
+- [Example App](#example-app)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
@@ -65,7 +68,7 @@ This component owns all of that. Drop it in, mount the webhook, and your Convex 
 npm install convex-paystack
 ```
 
-**Requirements:** Convex v1.33.1 or later, Node.js 18+, a [Paystack](https://paystack.com) account
+**Requirements:** Convex v1.34.1 or later, Node.js 18+, a [Paystack](https://paystack.com) account
 
 ## Quick Start
 
@@ -224,9 +227,64 @@ export const getHistory = query({
 
 Call `verifyTransaction()` from your callback route (or rely on the `charge.success` webhook) to confirm the final status — never trust the client-side redirect alone.
 
+Two optional arguments shape what the customer sees at checkout:
+
+- **`channels`** restricts which payment methods Paystack's hosted page offers — any of `"card"`, `"bank"`, `"apple_pay"`, `"ussd"`, `"qr"`, `"mobile_money"`, `"bank_transfer"`, `"eft"`, `"capitec_pay"`, `"payattitude"`. Omit it to let Paystack offer everything enabled on your account.
+- **`plan`** turns a one-time checkout into a subscription — see [Plans](#plans).
+
+```ts
+await paystack.initializeTransaction(ctx, {
+  email: "customer@example.com",
+  amount: 500000,
+  channels: ["card", "bank_transfer", "ussd"],
+});
+```
+
+Pass `currency` to charge in something other than your account's default (Paystack test accounts are usually NGN-only until you enable more in **Dashboard → Settings → Preferences**). Rather than guessing, check what's actually enabled with `listBalances()`:
+
+```ts
+const balances = await paystack.listBalances(ctx);
+// [{ currency: "NGN", balance: 0 }]
+const enabledCurrencies = balances.map((b) => b.currency);
+```
+
+Charging a currency that isn't enabled throws `Currency not supported by merchant` — this component does not silently convert or substitute currencies for you.
+
+## Plans
+
+Plans are the billing schedule a subscription is built on — an amount, a currency, and an interval (`daily`, `weekly`, `monthly`, `quarterly`, `biannually`, `annually`). Create one, then pass its `planCode` to `initializeTransaction()`: the customer's first successful payment automatically starts the subscription, and this component records it as soon as the `subscription.create` webhook arrives.
+
+```ts
+export const createProPlan = action({
+  args: {},
+  handler: async (ctx) => {
+    return await paystack.createPlan(ctx, {
+      name: "Pro Monthly",
+      amount: 500000, // ₦5,000.00 in kobo
+      interval: "monthly",
+      currency: "NGN",
+    });
+  },
+});
+// Returns: { planCode, name, amount, interval, currency, description? }
+
+export const startSubscription = action({
+  args: { email: v.string(), planCode: v.string(), amount: v.number() },
+  handler: async (ctx, args) => {
+    return await paystack.initializeTransaction(ctx, {
+      email: args.email,
+      amount: args.amount,
+      plan: args.planCode,
+    });
+  },
+});
+```
+
+`listPlans()` returns every plan already created on your Paystack account, so you can check for an existing plan by name before creating a duplicate — this is exactly the pattern the [example app](#example-app) uses to bootstrap its demo plans on first run.
+
 ## Subscriptions
 
-Subscriptions are created on Paystack's side (via the [Subscriptions API](https://paystack.com/docs/payments/subscriptions/) or Dashboard) against a plan and a customer with a prior transaction. This component mirrors subscription state reactively as webhooks arrive, and exposes cancel/enable:
+Once a plan exists, a subscription is created automatically the first time a customer pays through a checkout initialized with that `plan` code (see [Plans](#plans) above). This component mirrors subscription state reactively as webhooks arrive, and exposes cancel/enable:
 
 ```ts
 export const cancelPlan = action({
@@ -240,12 +298,26 @@ export const cancelPlan = action({
 
 `code` and `token` are the subscription's `subscription_code` and `email_token`, both delivered on the `subscription.create` webhook and available via `getSubscription()`.
 
+If a subscription isn't showing up locally, it's almost always a webhook that hasn't reached your deployment yet (a fresh Convex project whose webhook URL was never registered in Paystack, most commonly). `syncCustomerSubscriptions()` is a fallback for exactly that — it reads the customer's live subscriptions from Paystack's [Fetch Customer](https://paystack.com/docs/api/customer/#fetch) endpoint and upserts them, no webhook required:
+
+```ts
+export const syncSubscriptions = action({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    return await paystack.syncCustomerSubscriptions(ctx, { email: args.email });
+  },
+});
+// Returns: number of subscriptions synced
+```
+
 ## API Reference
 
 | Method | Kind | Description |
 | --- | --- | --- |
-| `initializeTransaction(ctx, args)` | action | Starts a Paystack checkout, returns the hosted payment link |
+| `initializeTransaction(ctx, args)` | action | Starts a Paystack checkout, returns the hosted payment link — pass `plan` to start a subscription |
 | `verifyTransaction(ctx, args)` | action | Confirms a transaction's final status with Paystack |
+| `createPlan(ctx, args)` | action | Creates a billing plan on Paystack |
+| `listPlans(ctx)` | action | Lists every billing plan on your Paystack account |
 | `cancelSubscription(ctx, args)` | action | Disables a subscription on Paystack and locally |
 | `enableSubscription(ctx, args)` | action | Re-enables a non-renewing subscription |
 | `getTransaction(ctx, args)` | query | Fetch one transaction by reference |
@@ -253,6 +325,10 @@ export const cancelPlan = action({
 | `getSubscription(ctx, args)` | query | Fetch one subscription by subscription code |
 | `listSubscriptions(ctx, args)` | query | List a customer's subscriptions |
 | `hasActiveSubscription(ctx, args)` | query | `true` if the customer has an active or non-renewing subscription |
+| `listRecentEvents(ctx, args?)` | query | Raw webhook event log, newest first — audit trail or a live console |
+| `getStats(ctx)` | query | Aggregate transaction/subscription/event counts for a small dashboard |
+| `listBalances(ctx)` | action | Currencies actually enabled on your Paystack account, with their available balance |
+| `syncCustomerSubscriptions(ctx, args)` | action | Pulls a customer's subscriptions straight from Paystack and upserts them locally — a fallback for when the webhook hasn't arrived (or isn't registered) yet |
 
 ## Type Reference
 
@@ -263,7 +339,29 @@ type InitializeTransactionArgs = {
   currency?: string;
   callbackUrl?: string;
   reference?: string;
+  channels?: Array<
+    | "card" | "bank" | "apple_pay" | "ussd" | "qr"
+    | "mobile_money" | "bank_transfer" | "eft" | "capitec_pay" | "payattitude"
+  >;
+  plan?: string;
   metadata?: Record<string, unknown>;
+};
+
+type CreatePlanArgs = {
+  name: string;
+  amount: number;
+  interval: "daily" | "weekly" | "monthly" | "quarterly" | "biannually" | "annually";
+  currency?: string;
+  description?: string;
+};
+
+type PlanResult = {
+  planCode: string;
+  name: string;
+  amount: number;
+  interval: string;
+  currency: string;
+  description?: string;
 };
 
 type Transaction = {
@@ -289,6 +387,11 @@ type Subscription = {
   amount?: number;
   nextPaymentDate?: number;
 };
+
+type Balance = {
+  currency: string;
+  balance: number;
+};
 ```
 
 ## Webhook Events
@@ -302,6 +405,7 @@ The webhook handler verifies the `x-paystack-signature` header (hex-encoded HMAC
 | `subscription.disable` | Marks the subscription `cancelled` |
 | `subscription.not_renew` | Marks the subscription `non-renewing` |
 | `invoice.update` | Marks the subscription `active` or `attention` depending on invoice status |
+| `invoice.payment_failed` | Marks the subscription `attention` |
 
 All other event types are accepted (HTTP 200) but ignored, so you can register every event on one endpoint without errors.
 
@@ -324,6 +428,10 @@ webhookEvents: {
 }
 ```
 
+Plans are not stored locally — Paystack is the source of truth for them, the same way it is for verified transactions. `listPlans()` reads live from Paystack.
+
+`listRecentEvents()` reads `webhookEvents` directly — every event this component's webhook handler has ever received, whether or not it changed a transaction or subscription. `getStats()` returns row counts across all three tables with a full scan, intended for a small dashboard rather than a high-volume production metric.
+
 ## Customer IDs
 
 This component keys everything on `customerEmail` — the email Paystack has on file for the transaction or subscription. If your app identifies customers a different way (e.g. an internal user id), keep a mapping from your own id to the email you pass into this component.
@@ -336,11 +444,34 @@ npm run test
 
 Component logic is tested with [`convex-test`](https://www.npmjs.com/package/convex-test) in `src/component/lib.test.ts`. Import `convex-paystack/test` in your own app to register this component's schema against your test instance.
 
+## Example App
+
+`example/` is a full Vite + React demo, styled with Paystack's and Convex's own brand colors, that exercises the entire component end to end against your own Paystack test-mode account:
+
+- **One-time payment** — pick an amount and currency, choose which checkout channels to offer, pay, and land on a result screen driven by `verifyTransaction()`.
+- **Subscriptions** — the app bootstraps two demo plans via `createPlan()` / `listPlans()` on first load and lets you subscribe to either.
+- **Retry flow** — a declined or abandoned payment surfaces a "Try again" action that returns you to the same flow with your details preserved.
+- **Transaction history** — a live Convex query over `listTransactions()` / `listSubscriptions()` that updates the instant a webhook lands, no refresh needed.
+- **Live developer console** — a pinned panel (bottom of the page) that interleaves client-side actions (checkout started, verifying…) with the real webhook log from `listRecentEvents()`, reactively, so you can watch the entire lifecycle of a payment or subscription as it happens. Click any webhook row to see its raw payload.
+
+Run it with:
+
+```bash
+cd example
+npm install
+npx convex dev
+# in another terminal
+npm run dev
+```
+
+Use Paystack's [test cards](https://paystack.com/docs/payments/test-payments/) to exercise both outcomes — `4084 0840 8408 4081` always succeeds, `4084 0800 0000 5408` always declines so you can see the retry flow.
+
 ## Limitations
 
-- Amounts are in Paystack's subunit for the currency (kobo, pesewas, cents) — this component does not convert them.
+- Amounts are in Paystack's subunit for the currency (kobo, pesewas, cents) — this component does not convert them. The example app converts major-unit input (e.g. Naira) to subunits before calling `initializeTransaction`.
 - Only the webhook events listed above update local state; other events are received but not persisted beyond the raw idempotency record.
 - `cancelSubscription` / `enableSubscription` require the subscription's `code` and `token`, both only available after a `subscription.create` webhook has been received.
+- `createPlan` / `listPlans` talk to Paystack directly on every call — this component does not cache plans locally.
 
 ## Troubleshooting
 
@@ -348,7 +479,7 @@ Component logic is tested with [`convex-test`](https://www.npmjs.com/package/con
 
 **Transaction stays `pending`** — `initializeTransaction` only records `pending`; it becomes `success`/`failed` once the `charge.success` webhook arrives or you call `verifyTransaction`.
 
-**Subscription never appears** — subscriptions are created on Paystack, not by this component. Confirm the `subscription.create` webhook is registered and reaching your endpoint.
+**Subscription never appears** — subscriptions are created on Paystack, not by this component. Confirm the `subscription.create` webhook is registered and reaching your endpoint, and that the checkout was initialized with a `plan` code.
 
 ## Contributing
 
