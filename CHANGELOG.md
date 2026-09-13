@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.2
+
+### Patch Changes
+
+- Add demo screenshot to README
+
 ## 0.0.1
 
 - Add Balance API currency detection so checkout only offers currencies actually
