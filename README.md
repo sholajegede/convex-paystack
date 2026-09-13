@@ -7,6 +7,8 @@
 [![npm downloads](https://img.shields.io/npm/dw/convex-paystack)](https://www.npmjs.com/package/convex-paystack)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 
+![convex-paystack demo](./demo.png)
+
 ```ts
 const paystack = new Paystack(components.convexPaystack, {
   secretKey: process.env.PAYSTACK_SECRET_KEY!,
