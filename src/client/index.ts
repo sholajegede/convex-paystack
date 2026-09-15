@@ -262,7 +262,7 @@ export class Paystack {
   }
 
   async initializeTransaction(
-    ctx: GenericActionCtx<GenericDataModel>,
+    ctx: RunMutationCtx,
     args: InitializeTransactionArgs,
   ): Promise<InitializeTransactionResult> {
     const res = await fetch(`${PAYSTACK_API_BASE}/transaction/initialize`, {
@@ -308,7 +308,7 @@ export class Paystack {
   }
 
   async verifyTransaction(
-    ctx: GenericActionCtx<GenericDataModel>,
+    ctx: RunMutationCtx,
     args: { reference: string },
   ): Promise<VerifyTransactionResult> {
     const res = await fetch(
@@ -361,7 +361,7 @@ export class Paystack {
   }
 
   async cancelSubscription(
-    ctx: GenericActionCtx<GenericDataModel>,
+    ctx: RunMutationCtx,
     args: { code: string; token: string },
   ): Promise<void> {
     const res = await fetch(`${PAYSTACK_API_BASE}/subscription/disable`, {
@@ -383,7 +383,7 @@ export class Paystack {
   }
 
   async enableSubscription(
-    ctx: GenericActionCtx<GenericDataModel>,
+    ctx: RunMutationCtx,
     args: { code: string; token: string },
   ): Promise<void> {
     const res = await fetch(`${PAYSTACK_API_BASE}/subscription/enable`, {
@@ -410,7 +410,7 @@ export class Paystack {
    * `initializeTransaction` to start a subscription on first payment.
    */
   async createPlan(
-    ctx: GenericActionCtx<GenericDataModel>,
+    _ctx: unknown,
     args: CreatePlanArgs,
   ): Promise<PlanResult> {
     const res = await fetch(`${PAYSTACK_API_BASE}/plan`, {
@@ -446,7 +446,7 @@ export class Paystack {
    * Requires the secret key to have balance-read access; if it doesn't,
    * catch the error and fall back to your account's default currency.
    */
-  async listBalances(_ctx: GenericActionCtx<GenericDataModel>): Promise<Balance[]> {
+  async listBalances(_ctx: unknown): Promise<Balance[]> {
     const res = await fetch(`${PAYSTACK_API_BASE}/balance`, {
       headers: { Authorization: `Bearer ${this.options.secretKey}` },
     });
@@ -473,7 +473,7 @@ export class Paystack {
    * Returns the number of subscriptions synced.
    */
   async syncCustomerSubscriptions(
-    ctx: GenericActionCtx<GenericDataModel>,
+    ctx: RunMutationCtx,
     args: { email: string },
   ): Promise<number> {
     const res = await fetch(
@@ -515,7 +515,7 @@ export class Paystack {
   }
 
   /** List billing plans already created on this Paystack account. */
-  async listPlans(_ctx: GenericActionCtx<GenericDataModel>): Promise<PlanResult[]> {
+  async listPlans(_ctx: unknown): Promise<PlanResult[]> {
     const res = await fetch(`${PAYSTACK_API_BASE}/plan?perPage=100`, {
       headers: { Authorization: `Bearer ${this.options.secretKey}` },
     });
@@ -567,4 +567,15 @@ export class Paystack {
 
 type RunQueryCtx = {
   runQuery: GenericActionCtx<GenericDataModel>["runQuery"];
+};
+
+// initializeTransaction, verifyTransaction, cancelSubscription,
+// enableSubscription, and syncCustomerSubscriptions only ever call
+// ctx.runMutation. Typing them against this minimal structural type instead
+// of the full GenericActionCtx<GenericDataModel> means they accept any real
+// app's ActionCtx, whose DataModel is a concrete set of tables (not
+// assignable to the generic GenericDataModel once an app defines any tables
+// of its own).
+type RunMutationCtx = {
+  runMutation: GenericActionCtx<GenericDataModel>["runMutation"];
 };
