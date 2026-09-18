@@ -3,7 +3,7 @@
 **Accept payments and subscriptions with Paystack in your Convex app.** Reactive transactions, subscription state, and webhook ingestion.
 
 [![npm version](https://img.shields.io/npm/v/convex-paystack)](https://www.npmjs.com/package/convex-paystack)
-[![Convex Component](https://www.convex.dev/components/badge/sholajegede/convex-paystack)](https://www.convex.dev/components/convex-paystack)
+[![Convex Component](https://www.convex.dev/components/badge/convex-paystack)](https://www.convex.dev/components/convex-paystack)
 [![npm downloads](https://img.shields.io/npm/dw/convex-paystack)](https://www.npmjs.com/package/convex-paystack)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 
